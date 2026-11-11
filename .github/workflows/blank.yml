@@ -1,0 +1,821 @@
+# name: Build NeonHUD IPA
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Creer les fichiers de l'app
+        run: |
+          mkdir -p NeonHUD
+          cat > 'project.yml' <<'EOF_NEONHUD'
+          name: NeonHUD
+          options:
+            bundleIdPrefix: com.demo
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            NeonHUD:
+              type: application
+              platform: iOS
+              sources:
+                - NeonHUD
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.demo.neonhud
+                  PRODUCT_NAME: NeonHUD
+                  MARKETING_VERSION: "1.0"
+                  CURRENT_PROJECT_VERSION: "1"
+                  SWIFT_VERSION: "5.0"
+                  TARGETED_DEVICE_FAMILY: "1"
+                  GENERATE_INFOPLIST_FILE: YES
+                  INFOPLIST_KEY_CFBundleDisplayName: NeonHUD
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_UIStatusBarHidden: YES
+                  INFOPLIST_KEY_UIRequiresFullScreen: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+                  CODE_SIGNING_ALLOWED: NO
+                  CODE_SIGNING_REQUIRED: NO
+                  CODE_SIGN_IDENTITY: ""
+          EOF_NEONHUD
+          cat > 'NeonHUD/ArenaView.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          /// Cible fictive animée, utilisée uniquement pour la démonstration visuelle.
+          struct DemoTarget {
+              let name: String
+              let baseX: Double, baseY: Double
+              let ampX: Double, ampY: Double
+              let speed: Double, phase: Double
+              let depth: Double
+              let health: Double
+
+              func frame(in size: CGSize, time t: Double) -> CGRect {
+                  let x = (baseX + ampX * sin(t * speed + phase)) * size.width
+                  let y = (baseY + ampY * cos(t * speed * 0.7 + phase)) * size.height
+                  let h = 95 * depth
+                  let w = h * 0.45
+                  return CGRect(x: x - w / 2, y: y - h / 2, width: w, height: h)
+              }
+
+              var distance: Int { Int(140 / depth) }
+
+              static let samples: [DemoTarget] = [
+                  .init(name: "BOT-ALPHA", baseX: 0.30, baseY: 0.58, ampX: 0.12, ampY: 0.03, speed: 0.6, phase: 0, depth: 0.9, health: 0.85),
+                  .init(name: "BOT-BRAVO", baseX: 0.68, baseY: 0.55, ampX: 0.10, ampY: 0.04, speed: 0.8, phase: 1.7, depth: 0.7, health: 0.45),
+                  .init(name: "BOT-CHARLIE", baseX: 0.50, baseY: 0.72, ampX: 0.18, ampY: 0.03, speed: 0.45, phase: 3.1, depth: 1.2, health: 1.0),
+                  .init(name: "BOT-DELTA", baseX: 0.82, baseY: 0.68, ampX: 0.07, ampY: 0.05, speed: 1.0, phase: 4.4, depth: 1.0, health: 0.25),
+                  .init(name: "BOT-ECHO", baseX: 0.18, baseY: 0.50, ampX: 0.06, ampY: 0.02, speed: 0.9, phase: 2.2, depth: 0.55, health: 0.65),
+                  .init(name: "BOT-FOXTROT", baseX: 0.45, baseY: 0.52, ampX: 0.15, ampY: 0.02, speed: 0.7, phase: 5.3, depth: 0.6, health: 0.9),
+              ]
+          }
+
+          /// Scène d'entraînement fictive : grille néon + cibles + overlay HUD.
+          struct ArenaView: View {
+              @EnvironmentObject private var s: HUDSettings
+
+              var body: some View {
+                  TimelineView(.animation(paused: !s.demoAnimated)) { timeline in
+                      Canvas { ctx, size in
+                          let t = timeline.date.timeIntervalSinceReferenceDate
+                          let center = CGPoint(x: size.width / 2, y: size.height / 2)
+
+                          drawBackground(&ctx, size: size, t: t)
+
+                          for target in DemoTarget.samples.prefix(Int(s.targetCount)) {
+                              let f = target.frame(in: size, time: t)
+                              drawTarget(&ctx, f)
+                              if s.espEnabled {
+                                  drawESP(&ctx, target: target, frame: f, size: size, center: center)
+                              }
+                          }
+
+                          if s.fovEnabled { drawFOV(&ctx, center: center) }
+                          if s.crosshairEnabled { drawCrosshair(&ctx, center: center) }
+                      }
+                  }
+                  .accessibilityLabel("Scène de démonstration avec cibles fictives")
+              }
+
+              private func drawBackground(_ ctx: inout GraphicsContext, size: CGSize, t: Double) {
+                  ctx.fill(
+                      Path(CGRect(origin: .zero, size: size)),
+                      with: .linearGradient(
+                          Gradient(colors: [
+                              Color(red: 0.02, green: 0.02, blue: 0.09),
+                              Color(red: 0.09, green: 0.03, blue: 0.22),
+                              Color(red: 0.02, green: 0.05, blue: 0.16),
+                          ]),
+                          startPoint: .zero,
+                          endPoint: CGPoint(x: 0, y: size.height)
+                      )
+                  )
+
+                  let horizon = size.height * 0.42
+                  let vanishing = CGPoint(x: size.width / 2, y: horizon)
+                  var grid = Path()
+                  for i in -12...12 {
+                      grid.move(to: vanishing)
+                      grid.addLine(to: CGPoint(x: size.width / 2 + Double(i) * size.width / 6, y: size.height))
+                  }
+                  let scroll = (t * 0.25).truncatingRemainder(dividingBy: 1)
+                  for i in 0..<14 {
+                      let k = (Double(i) + scroll) / 14
+                      let y = horizon + pow(k, 2.2) * (size.height - horizon)
+                      grid.move(to: CGPoint(x: 0, y: y))
+                      grid.addLine(to: CGPoint(x: size.width, y: y))
+                  }
+                  ctx.stroke(grid, with: .color(Theme.violet.opacity(0.22)), lineWidth: 1)
+
+                  var horizonLine = Path()
+                  horizonLine.move(to: CGPoint(x: 0, y: horizon))
+                  horizonLine.addLine(to: CGPoint(x: size.width, y: horizon))
+                  ctx.stroke(horizonLine, with: .color(Theme.cyan.opacity(0.25)), lineWidth: 6)
+                  ctx.stroke(horizonLine, with: .color(Theme.cyan.opacity(0.7)), lineWidth: 1.2)
+              }
+
+              private func drawTarget(_ ctx: inout GraphicsContext, _ f: CGRect) {
+                  let headR = f.width * 0.32
+                  let head = Path(ellipseIn: CGRect(x: f.midX - headR, y: f.minY, width: headR * 2, height: headR * 2))
+                  let body = Path(
+                      roundedRect: CGRect(x: f.minX + f.width * 0.1, y: f.minY + headR * 2 + 2,
+                                          width: f.width * 0.8, height: f.height - headR * 2 - 2),
+                      cornerRadius: f.width * 0.25
+                  )
+                  ctx.fill(head, with: .color(.white.opacity(0.2)))
+                  ctx.fill(body, with: .color(.white.opacity(0.14)))
+              }
+
+              private func drawESP(_ ctx: inout GraphicsContext, target: DemoTarget, frame f: CGRect, size: CGSize, center: CGPoint) {
+                  let insideFOV = s.fovEnabled && Double(hypot(f.midX - center.x, f.midY - center.y)) <= s.fovRadius
+                  let color = insideFOV ? Color.white : s.espColor
+
+                  if s.espBoxes {
+                      ctx.fill(Path(f), with: .color(color.opacity(0.06)))
+                      ctx.stroke(cornerBox(f), with: .color(color), lineWidth: 1.6)
+                  }
+
+                  if s.espLines {
+                      var line = Path()
+                      line.move(to: CGPoint(x: size.width / 2, y: size.height))
+                      line.addLine(to: CGPoint(x: f.midX, y: f.maxY))
+                      ctx.stroke(line, with: .color(color.opacity(0.55)), lineWidth: 1)
+                  }
+
+                  if s.espHealth {
+                      let bar = CGRect(x: f.minX - 7, y: f.minY, width: 3, height: f.height)
+                      let fillH = f.height * target.health
+                      let fill = CGRect(x: bar.minX, y: bar.maxY - fillH, width: 3, height: fillH)
+                      let healthColor = target.health > 0.6 ? Color.green : (target.health > 0.3 ? Color.yellow : Color.red)
+                      ctx.fill(Path(bar), with: .color(.black.opacity(0.6)))
+                      ctx.fill(Path(fill), with: .color(healthColor))
+                  }
+
+                  if s.espNames {
+                      ctx.draw(
+                          Text(target.name).font(Theme.label(10, .bold)).foregroundColor(color),
+                          at: CGPoint(x: f.midX, y: f.minY - 9)
+                      )
+                  }
+
+                  if s.espDistance {
+                      ctx.draw(
+                          Text("\(target.distance) m").font(Theme.label(9, .medium)).foregroundColor(color.opacity(0.85)),
+                          at: CGPoint(x: f.midX, y: f.maxY + 9)
+                      )
+                  }
+              }
+
+              private func cornerBox(_ r: CGRect) -> Path {
+                  let l = min(r.width, r.height) * 0.28
+                  var p = Path()
+                  p.move(to: CGPoint(x: r.minX, y: r.minY + l)); p.addLine(to: CGPoint(x: r.minX, y: r.minY)); p.addLine(to: CGPoint(x: r.minX + l, y: r.minY))
+                  p.move(to: CGPoint(x: r.maxX - l, y: r.minY)); p.addLine(to: CGPoint(x: r.maxX, y: r.minY)); p.addLine(to: CGPoint(x: r.maxX, y: r.minY + l))
+                  p.move(to: CGPoint(x: r.maxX, y: r.maxY - l)); p.addLine(to: CGPoint(x: r.maxX, y: r.maxY)); p.addLine(to: CGPoint(x: r.maxX - l, y: r.maxY))
+                  p.move(to: CGPoint(x: r.minX + l, y: r.maxY)); p.addLine(to: CGPoint(x: r.minX, y: r.maxY)); p.addLine(to: CGPoint(x: r.minX, y: r.maxY - l))
+                  return p
+              }
+
+              private func drawFOV(_ ctx: inout GraphicsContext, center: CGPoint) {
+                  let r = s.fovRadius
+                  let circle = Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
+                  if s.fovFilled {
+                      ctx.fill(circle, with: .color(s.fovColor.opacity(s.fovOpacity * 0.15)))
+                  }
+                  ctx.stroke(circle, with: .color(s.fovColor.opacity(s.fovOpacity * 0.3)), lineWidth: s.fovThickness + 5)
+                  ctx.stroke(circle, with: .color(s.fovColor.opacity(s.fovOpacity)), lineWidth: s.fovThickness)
+              }
+
+              private func drawCrosshair(_ ctx: inout GraphicsContext, center: CGPoint) {
+                  let gap = 4.0, len = 9.0
+                  var p = Path()
+                  p.move(to: CGPoint(x: center.x - gap - len, y: center.y)); p.addLine(to: CGPoint(x: center.x - gap, y: center.y))
+                  p.move(to: CGPoint(x: center.x + gap, y: center.y)); p.addLine(to: CGPoint(x: center.x + gap + len, y: center.y))
+                  p.move(to: CGPoint(x: center.x, y: center.y - gap - len)); p.addLine(to: CGPoint(x: center.x, y: center.y - gap))
+                  p.move(to: CGPoint(x: center.x, y: center.y + gap)); p.addLine(to: CGPoint(x: center.x, y: center.y + gap + len))
+                  ctx.stroke(p, with: .color(Theme.cyan), lineWidth: 1.8)
+                  ctx.fill(Path(ellipseIn: CGRect(x: center.x - 1.5, y: center.y - 1.5, width: 3, height: 3)), with: .color(.white))
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/Controls.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          struct NeonToggleRow: View {
+              @EnvironmentObject private var s: HUDSettings
+              let title: String
+              let icon: String
+              @Binding var isOn: Bool
+
+              var body: some View {
+                  HStack(spacing: 10) {
+                      Image(systemName: icon)
+                          .font(.system(size: 13, weight: .semibold))
+                          .foregroundStyle(Theme.accent)
+                          .frame(width: 20)
+                          .accessibilityHidden(true)
+                      Text(title)
+                          .font(Theme.label(13))
+                          .foregroundColor(.white)
+                      Spacer()
+                      Button {
+                          isOn.toggle()
+                          Haptics.tap(s.hapticsEnabled)
+                      } label: {
+                          Text(isOn ? "ON" : "OFF")
+                              .font(Theme.label(11, .heavy))
+                              .tracking(1)
+                              .foregroundColor(isOn ? .white : .white.opacity(0.5))
+                              .frame(width: 54, height: 28)
+                              .background(
+                                  Capsule().fill(isOn ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(Color.white.opacity(0.07)))
+                              )
+                              .overlay(Capsule().stroke(isOn ? Theme.cyan.opacity(0.8) : .white.opacity(0.15), lineWidth: 1))
+                              .shadow(color: isOn ? Theme.violet.opacity(0.7) : .clear, radius: 8)
+                              .contentShape(Capsule())
+                      }
+                      .buttonStyle(.plain)
+                      .accessibilityLabel(title)
+                      .accessibilityValue(isOn ? "Activé" : "Désactivé")
+                  }
+                  .animation(.easeOut(duration: 0.15), value: isOn)
+              }
+          }
+
+          struct NeonSliderRow: View {
+              let title: String
+              @Binding var value: Double
+              let range: ClosedRange<Double>
+              var step: Double = 1
+              var format: (Double) -> String = { String(Int($0)) }
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 2) {
+                      HStack {
+                          Text(title).font(Theme.label(12)).foregroundColor(.white.opacity(0.85))
+                          Spacer()
+                          Text(format(value))
+                              .font(Theme.label(12, .bold))
+                              .monospacedDigit()
+                              .foregroundColor(Theme.cyan)
+                      }
+                      Slider(value: $value, in: range, step: step)
+                          .tint(Theme.violet)
+                          .accessibilityLabel(title)
+                          .accessibilityValue(format(value))
+                  }
+              }
+          }
+
+          struct NeonColorRow: View {
+              let title: String
+              @Binding var color: Color
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 6) {
+                      Text(title).font(Theme.label(12)).foregroundColor(.white.opacity(0.85))
+                      HStack(spacing: 8) {
+                          ForEach(Theme.presets.indices, id: \.self) { i in
+                              Button {
+                                  color = Theme.presets[i]
+                              } label: {
+                                  Circle()
+                                      .fill(Theme.presets[i])
+                                      .frame(width: 22, height: 22)
+                                      .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+                                      .shadow(color: Theme.presets[i].opacity(0.6), radius: 4)
+                              }
+                              .buttonStyle(.plain)
+                              .accessibilityLabel("Couleur prédéfinie \(i + 1)")
+                          }
+                          Spacer(minLength: 0)
+                          ColorPicker(title, selection: $color, supportsOpacity: false)
+                              .labelsHidden()
+                              .frame(width: 28)
+                      }
+                  }
+              }
+          }
+
+          struct SectionLabel: View {
+              let text: String
+              var body: some View {
+                  Text(text.uppercased())
+                      .font(Theme.label(10, .heavy))
+                      .tracking(1.5)
+                      .foregroundColor(Theme.violet)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                      .padding(.top, 4)
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/FloatingMenu.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          enum MenuTab: String, CaseIterable, Identifiable {
+              case fov = "FOV", esp = "ESP", settings = "Réglages"
+              var id: String { rawValue }
+              var icon: String {
+                  switch self {
+                  case .fov: return "circle.dashed"
+                  case .esp: return "viewfinder"
+                  case .settings: return "slider.horizontal.3"
+                  }
+              }
+          }
+
+          struct FloatingMenu: View {
+              @EnvironmentObject private var s: HUDSettings
+              @Binding var origin: CGPoint
+              let bounds: CGSize
+
+              @State private var collapsed = false
+              @State private var tab: MenuTab = .fov
+              @State private var dragStart: CGPoint?
+
+              private let width: CGFloat = 284
+              private let headerHeight: CGFloat = 46
+
+              var body: some View {
+                  VStack(spacing: 0) {
+                      header
+                      if !collapsed {
+                          Rectangle().fill(Theme.border).frame(height: 1).opacity(0.5)
+                          tabBar.padding(.horizontal, 12).padding(.top, 10)
+                          ScrollView(showsIndicators: false) {
+                              VStack(spacing: 14) { tabContent }
+                                  .padding(12)
+                          }
+                          .frame(maxHeight: max(160, min(360, bounds.height - origin.y - headerHeight - 60)))
+                      }
+                  }
+                  .frame(width: width)
+                  .background(
+                      ZStack {
+                          RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial)
+                          RoundedRectangle(cornerRadius: 18).fill(Theme.panel.opacity(s.menuOpacity))
+                      }
+                  )
+                  .overlay(RoundedRectangle(cornerRadius: 18).stroke(Theme.border, lineWidth: 1.2))
+                  .clipShape(RoundedRectangle(cornerRadius: 18))
+                  .shadow(color: Theme.violet.opacity(0.45), radius: 18)
+                  .animation(.spring(response: 0.35, dampingFraction: 0.85), value: collapsed)
+                  .offset(x: clamp(origin).x, y: clamp(origin).y)
+              }
+
+              private var header: some View {
+                  HStack(spacing: 8) {
+                      Image(systemName: "scope")
+                          .font(.system(size: 15, weight: .bold))
+                          .foregroundStyle(Theme.accent)
+                      Text("NEON HUD")
+                          .font(Theme.label(14, .black))
+                          .tracking(2)
+                          .foregroundColor(.white)
+                      Spacer()
+                      Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                          .font(.system(size: 11))
+                          .foregroundColor(.white.opacity(0.35))
+                          .accessibilityHidden(true)
+                      HeaderButton(icon: collapsed ? "chevron.down" : "chevron.up",
+                                   label: collapsed ? "Agrandir le menu" : "Réduire le menu") {
+                          collapsed.toggle()
+                          Haptics.tap(s.hapticsEnabled)
+                      }
+                      HeaderButton(icon: "xmark", label: "Masquer le menu") {
+                          s.menuVisible = false
+                          Haptics.tap(s.hapticsEnabled)
+                      }
+                  }
+                  .padding(.horizontal, 12)
+                  .frame(height: headerHeight)
+                  .contentShape(Rectangle())
+                  .gesture(dragGesture)
+              }
+
+              private var tabBar: some View {
+                  HStack(spacing: 4) {
+                      ForEach(MenuTab.allCases) { item in
+                          Button {
+                              tab = item
+                              Haptics.tap(s.hapticsEnabled)
+                          } label: {
+                              HStack(spacing: 4) {
+                                  Image(systemName: item.icon).font(.system(size: 11, weight: .bold))
+                                  Text(item.rawValue).font(Theme.label(11, .bold))
+                              }
+                              .foregroundColor(tab == item ? .white : .white.opacity(0.5))
+                              .frame(maxWidth: .infinity, minHeight: 30)
+                              .background(
+                                  RoundedRectangle(cornerRadius: 9)
+                                      .fill(tab == item ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(Color.clear))
+                              )
+                              .contentShape(Rectangle())
+                          }
+                          .buttonStyle(.plain)
+                          .accessibilityAddTraits(tab == item ? .isSelected : [])
+                      }
+                  }
+                  .padding(3)
+                  .background(RoundedRectangle(cornerRadius: 11).fill(Color.white.opacity(0.06)))
+              }
+
+              @ViewBuilder
+              private var tabContent: some View {
+                  switch tab {
+                  case .fov:
+                      NeonToggleRow(title: "Cercle FOV", icon: "circle.dashed", isOn: $s.fovEnabled)
+                      NeonSliderRow(title: "Taille", value: $s.fovRadius, range: 30...260) { "\(Int($0)) px" }
+                      NeonSliderRow(title: "Épaisseur", value: $s.fovThickness, range: 1...8, step: 0.5) { String(format: "%.1f", $0) }
+                      NeonSliderRow(title: "Transparence", value: $s.fovOpacity, range: 0.1...1, step: 0.05) { "\(Int($0 * 100)) %" }
+                      NeonColorRow(title: "Couleur du cercle", color: $s.fovColor)
+                      NeonToggleRow(title: "Remplissage", icon: "circle.fill", isOn: $s.fovFilled)
+                      NeonToggleRow(title: "Réticule", icon: "plus", isOn: $s.crosshairEnabled)
+
+                  case .esp:
+                      NeonToggleRow(title: "ESP démo", icon: "viewfinder", isOn: $s.espEnabled)
+                      SectionLabel(text: "Éléments visuels")
+                      NeonToggleRow(title: "Boîtes", icon: "square.dashed", isOn: $s.espBoxes)
+                      NeonToggleRow(title: "Lignes", icon: "line.diagonal", isOn: $s.espLines)
+                      NeonToggleRow(title: "Noms", icon: "textformat", isOn: $s.espNames)
+                      NeonToggleRow(title: "Santé", icon: "heart.fill", isOn: $s.espHealth)
+                      NeonToggleRow(title: "Distance", icon: "ruler", isOn: $s.espDistance)
+                      NeonColorRow(title: "Couleur ESP", color: $s.espColor)
+                      NeonSliderRow(title: "Cibles fictives", value: $s.targetCount, range: 1...6)
+
+                  case .settings:
+                      NeonSliderRow(title: "Opacité du menu", value: $s.menuOpacity, range: 0.3...1, step: 0.05) { "\(Int($0 * 100)) %" }
+                      NeonToggleRow(title: "Vibrations", icon: "iphone.radiowaves.left.and.right", isOn: $s.hapticsEnabled)
+                      NeonToggleRow(title: "Animation démo", icon: "play.fill", isOn: $s.demoAnimated)
+                      Button {
+                          s.reset()
+                          Haptics.tap(s.hapticsEnabled)
+                      } label: {
+                          Label("Réinitialiser", systemImage: "arrow.counterclockwise")
+                              .font(Theme.label(13, .bold))
+                              .foregroundColor(.white)
+                              .frame(maxWidth: .infinity, minHeight: 38)
+                              .background(RoundedRectangle(cornerRadius: 10).stroke(Theme.border, lineWidth: 1.2))
+                              .contentShape(Rectangle())
+                      }
+                      .buttonStyle(.plain)
+                      Text("Application autonome de démonstration. Les cibles sont fictives ; aucune interaction avec un autre jeu ou une autre application.")
+                          .font(Theme.label(10, .regular))
+                          .foregroundColor(.white.opacity(0.45))
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                  }
+              }
+
+              private var dragGesture: some Gesture {
+                  DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                      .onChanged { value in
+                          let start = dragStart ?? clamp(origin)
+                          if dragStart == nil { dragStart = start }
+                          origin = clamp(CGPoint(x: start.x + value.translation.width,
+                                                 y: start.y + value.translation.height))
+                      }
+                      .onEnded { _ in dragStart = nil }
+              }
+
+              private func clamp(_ p: CGPoint) -> CGPoint {
+                  CGPoint(
+                      x: min(max(p.x, 0), max(0, bounds.width - width)),
+                      y: min(max(p.y, 0), max(0, bounds.height - headerHeight))
+                  )
+              }
+          }
+
+          private struct HeaderButton: View {
+              let icon: String
+              let label: String
+              let action: () -> Void
+
+              var body: some View {
+                  Button(action: action) {
+                      Image(systemName: icon)
+                          .font(.system(size: 12, weight: .bold))
+                          .foregroundColor(.white)
+                          .frame(width: 30, height: 30)
+                          .background(Circle().fill(Color.white.opacity(0.08)))
+                          .overlay(Circle().stroke(Theme.violet.opacity(0.5), lineWidth: 1))
+                          .contentShape(Circle())
+                  }
+                  .buttonStyle(.plain)
+                  .accessibilityLabel(label)
+              }
+          }
+
+          /// Bulle flottante déplaçable affichée quand le menu est désactivé.
+          struct FloatingBubble: View {
+              @EnvironmentObject private var s: HUDSettings
+              @Binding var origin: CGPoint
+              let bounds: CGSize
+
+              @State private var dragStart: CGPoint?
+              private let size: CGFloat = 56
+
+              var body: some View {
+                  Image(systemName: "scope")
+                      .font(.system(size: 22, weight: .bold))
+                      .foregroundColor(.white)
+                      .frame(width: size, height: size)
+                      .background(Circle().fill(Theme.accent))
+                      .overlay(Circle().stroke(Theme.cyan.opacity(0.8), lineWidth: 1.5))
+                      .shadow(color: Theme.violet.opacity(0.8), radius: 14)
+                      .contentShape(Circle())
+                      .offset(x: clamp(origin).x, y: clamp(origin).y)
+                      .onTapGesture {
+                          s.menuVisible = true
+                          Haptics.tap(s.hapticsEnabled)
+                      }
+                      .gesture(
+                          DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                              .onChanged { value in
+                                  let start = dragStart ?? clamp(origin)
+                                  if dragStart == nil { dragStart = start }
+                                  origin = clamp(CGPoint(x: start.x + value.translation.width,
+                                                         y: start.y + value.translation.height))
+                              }
+                              .onEnded { _ in dragStart = nil }
+                      )
+                      .accessibilityLabel("Afficher le menu")
+                      .accessibilityAddTraits(.isButton)
+              }
+
+              private func clamp(_ p: CGPoint) -> CGPoint {
+                  CGPoint(
+                      x: min(max(p.x, 0), max(0, bounds.width - size)),
+                      y: min(max(p.y, 0), max(0, bounds.height - size))
+                  )
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/HUDSettings.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          /// Paramètres persistés localement (UserDefaults).
+          final class HUDSettings: ObservableObject {
+              private static let store = UserDefaults.standard
+
+              private static func load<T>(_ key: String, _ fallback: T) -> T {
+                  store.object(forKey: key) as? T ?? fallback
+              }
+
+              private func save(_ value: Any, _ key: String) {
+                  Self.store.set(value, forKey: key)
+              }
+
+              // Menu
+              @Published var menuVisible: Bool { didSet { save(menuVisible, "menuVisible") } }
+              @Published var menuOpacity: Double { didSet { save(menuOpacity, "menuOpacity") } }
+              @Published var hapticsEnabled: Bool { didSet { save(hapticsEnabled, "hapticsEnabled") } }
+              @Published var demoAnimated: Bool { didSet { save(demoAnimated, "demoAnimated") } }
+
+              // Cercle FOV
+              @Published var fovEnabled: Bool { didSet { save(fovEnabled, "fovEnabled") } }
+              @Published var fovRadius: Double { didSet { save(fovRadius, "fovRadius") } }
+              @Published var fovThickness: Double { didSet { save(fovThickness, "fovThickness") } }
+              @Published var fovOpacity: Double { didSet { save(fovOpacity, "fovOpacity") } }
+              @Published var fovFilled: Bool { didSet { save(fovFilled, "fovFilled") } }
+              @Published var fovColor: Color { didSet { save(fovColor.rgba, "fovColor") } }
+              @Published var crosshairEnabled: Bool { didSet { save(crosshairEnabled, "crosshairEnabled") } }
+
+              // ESP de démonstration
+              @Published var espEnabled: Bool { didSet { save(espEnabled, "espEnabled") } }
+              @Published var espBoxes: Bool { didSet { save(espBoxes, "espBoxes") } }
+              @Published var espLines: Bool { didSet { save(espLines, "espLines") } }
+              @Published var espNames: Bool { didSet { save(espNames, "espNames") } }
+              @Published var espHealth: Bool { didSet { save(espHealth, "espHealth") } }
+              @Published var espDistance: Bool { didSet { save(espDistance, "espDistance") } }
+              @Published var espColor: Color { didSet { save(espColor.rgba, "espColor") } }
+              @Published var targetCount: Double { didSet { save(targetCount, "targetCount") } }
+
+              init() {
+                  menuVisible = Self.load("menuVisible", true)
+                  menuOpacity = Self.load("menuOpacity", 0.85)
+                  hapticsEnabled = Self.load("hapticsEnabled", true)
+                  demoAnimated = Self.load("demoAnimated", true)
+
+                  fovEnabled = Self.load("fovEnabled", true)
+                  fovRadius = Self.load("fovRadius", 110)
+                  fovThickness = Self.load("fovThickness", 2)
+                  fovOpacity = Self.load("fovOpacity", 0.9)
+                  fovFilled = Self.load("fovFilled", false)
+                  fovColor = Color(rgba: Self.load("fovColor", Theme.violet.rgba))
+                  crosshairEnabled = Self.load("crosshairEnabled", true)
+
+                  espEnabled = Self.load("espEnabled", true)
+                  espBoxes = Self.load("espBoxes", true)
+                  espLines = Self.load("espLines", false)
+                  espNames = Self.load("espNames", true)
+                  espHealth = Self.load("espHealth", true)
+                  espDistance = Self.load("espDistance", true)
+                  espColor = Color(rgba: Self.load("espColor", Theme.cyan.rgba))
+                  targetCount = Self.load("targetCount", 4)
+              }
+
+              func reset() {
+                  menuOpacity = 0.85
+                  hapticsEnabled = true
+                  demoAnimated = true
+                  fovEnabled = true
+                  fovRadius = 110
+                  fovThickness = 2
+                  fovOpacity = 0.9
+                  fovFilled = false
+                  fovColor = Theme.violet
+                  crosshairEnabled = true
+                  espEnabled = true
+                  espBoxes = true
+                  espLines = false
+                  espNames = true
+                  espHealth = true
+                  espDistance = true
+                  espColor = Theme.cyan
+                  targetCount = 4
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/NeonHUDApp.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          @main
+          struct NeonHUDApp: App {
+              @StateObject private var settings = HUDSettings()
+
+              var body: some Scene {
+                  WindowGroup {
+                      RootView()
+                          .environmentObject(settings)
+                          .preferredColorScheme(.dark)
+                  }
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/RootView.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+
+          struct RootView: View {
+              @EnvironmentObject private var s: HUDSettings
+              @State private var menuOrigin = CGPoint(x: 16, y: 40)
+
+              var body: some View {
+                  GeometryReader { geo in
+                      ZStack(alignment: .topLeading) {
+                          ArenaView()
+                              .ignoresSafeArea()
+
+                          DemoBadge()
+
+                          if s.menuVisible {
+                              FloatingMenu(origin: $menuOrigin, bounds: geo.size)
+                                  .transition(.scale(scale: 0.85, anchor: .topLeading).combined(with: .opacity))
+                          } else {
+                              FloatingBubble(origin: $menuOrigin, bounds: geo.size)
+                                  .transition(.scale.combined(with: .opacity))
+                          }
+                      }
+                      .animation(.spring(response: 0.35, dampingFraction: 0.8), value: s.menuVisible)
+                  }
+                  .statusBarHidden(true)
+                  .persistentSystemOverlays(.hidden)
+              }
+          }
+
+          private struct DemoBadge: View {
+              var body: some View {
+                  Text("MODE DÉMO • AUTONOME")
+                      .font(Theme.label(10, .heavy))
+                      .tracking(1.5)
+                      .foregroundColor(Theme.cyan)
+                      .padding(.horizontal, 10)
+                      .padding(.vertical, 5)
+                      .background(Capsule().fill(Color.black.opacity(0.45)))
+                      .overlay(Capsule().stroke(Theme.cyan.opacity(0.4), lineWidth: 1))
+                      .frame(maxWidth: .infinity, alignment: .trailing)
+                      .padding(12)
+                      .allowsHitTesting(false)
+                      .accessibilityHidden(true)
+              }
+          }
+          EOF_NEONHUD
+          cat > 'NeonHUD/Theme.swift' <<'EOF_NEONHUD'
+          import SwiftUI
+          import UIKit
+
+          enum Theme {
+              static let blue = Color(red: 0.16, green: 0.45, blue: 1.0)
+              static let violet = Color(red: 0.58, green: 0.27, blue: 1.0)
+              static let cyan = Color(red: 0.25, green: 0.88, blue: 1.0)
+              static let panel = Color(red: 0.05, green: 0.04, blue: 0.13)
+
+              static let accent = LinearGradient(colors: [blue, violet], startPoint: .leading, endPoint: .trailing)
+              static let border = LinearGradient(colors: [cyan.opacity(0.9), violet.opacity(0.9)], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+              static let presets: [Color] = [blue, violet, cyan, Color(red: 1, green: 0.3, blue: 0.75), Color(red: 0.3, green: 1, blue: 0.55), .white]
+
+              static func label(_ size: CGFloat = 12, _ weight: Font.Weight = .semibold) -> Font {
+                  .system(size: size, weight: weight, design: .rounded)
+              }
+          }
+
+          extension Color {
+              init(rgba: [Double]) {
+                  let c = rgba.count == 4 ? rgba : [1, 1, 1, 1]
+                  self.init(.sRGB, red: c[0], green: c[1], blue: c[2], opacity: c[3])
+              }
+
+              var rgba: [Double] {
+                  var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                  UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+                  return [Double(r), Double(g), Double(b), Double(a)]
+              }
+          }
+
+          enum Haptics {
+              static func tap(_ enabled: Bool) {
+                  guard enabled else { return }
+                  UIImpactFeedbackGenerator(style: .light).impactOccurred()
+              }
+          }
+          EOF_NEONHUD
+
+      - name: Installer XcodeGen
+        run: brew install xcodegen
+
+      - name: Generer le projet Xcode
+        run: xcodegen generate
+
+      - name: Compiler sans signature
+        run: |
+          xcodebuild -project NeonHUD.xcodeproj -target NeonHUD -configuration Release -sdk iphoneos SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Creer le fichier IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/NeonHUD.app Payload/
+          zip -qr NeonHUD.ipa Payload
+
+      - name: Envoyer l'IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonHUD-ipa
+          path: NeonHUD.ipaThis is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      # Runs a single command using the runners shell
+      - name: Run a one-line script
+        run: echo Hello, world!
+
+      # Runs a set of commands using the runners shell
+      - name: Run a multi-line script
+        run: |
+          echo Add other actions to build,
+          echo test, and deploy your project.
